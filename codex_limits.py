@@ -15,6 +15,7 @@ async def codex_request(method, params=None):
             os.environ.get("CODEX_BIN", "codex"), "app-server",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env={key: value for key, value in os.environ.items() if not key.startswith("TELEGRAM_")},
         )
     except OSError:
         raise LimitsUnavailable("Codex CLI не найден. Проверь CODEX_BIN.") from None

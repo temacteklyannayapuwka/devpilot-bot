@@ -81,11 +81,11 @@ def model_command(command, argument, settings):
             for item in models:
                 marker = " ✓" if item["model"] == selected else ""
                 lines.append(f"{item['model']}{marker}")
-            lines.append("Выбор: /model ИМЯ\nНастройка предназначена для будущих задач DevPilot.")
+            lines.append("Выбор: /model ИМЯ\nНастройка применяется при новом запуске DevPilot.")
             return "\n".join(lines)
         if argument not in {item["model"] for item in models}:
             return "Модель отсутствует в доступном списке. Посмотри /models."
         settings.save(argument)
-        return f"Сохранена модель: {argument}\nВыбор предназначен для будущих задач DevPilot. Текущие чаты Codex не меняются."
+        return f"Сохранена модель: {argument}\nОна будет использована при новом запуске DevPilot. Текущие задачи и чаты Codex не меняются."
     except (LimitsUnavailable, SettingsError) as error:
         return str(error)

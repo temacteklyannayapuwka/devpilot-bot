@@ -1,0 +1,20 @@
+{
+  "microwatch": {
+    "path": "~/Projects/microwatch",
+    "branch": "main",
+    "checks": [["go", "test", "./..."], ["go", "vet", "./..."]],
+    "timeout_seconds": 1800
+  },
+  "hookrelay": {
+    "path": "~/Projects/hookrelayapp",
+    "branch": "main",
+    "checks": [["./mvnw", "verify"]],
+    "timeout_seconds": 2400
+  },
+  "zabbix-bot": {
+    "path": "~/Projects/zabbix-tg-bot",
+    "branch": "main",
+    "checks": [["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]],
+    "timeout_seconds": 1800
+  }
+}

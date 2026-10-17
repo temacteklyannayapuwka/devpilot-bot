@@ -25,6 +25,9 @@ class State:
                 CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, text TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS updates (id INTEGER PRIMARY KEY);
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "thread_id" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN thread_id TEXT")
 
     @contextmanager
     def db(self):
@@ -46,10 +49,25 @@ class State:
         with self.db() as db:
             db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
 
-    def add(self, project, task):
+    def pending_requests(self, project):
+        with self.db() as db:
+            results = []
+            for row in db.execute("SELECT key,value FROM settings WHERE key LIKE 'dialog_request:%'"):
+                request = json.loads(row[1])
+                if request and request.get("project") == project:
+                    job = db.execute("SELECT status FROM jobs WHERE id=?", (request["job_id"],)).fetchone()
+                    if job and job[0] == "running":
+                        results.append((row[0].split(":", 1)[1], request))
+            return results
+
+    def mark_dialog_message(self, thread_id, item_id):
+        with self.db() as db:
+            return db.execute("INSERT OR IGNORE INTO settings VALUES (?, 'true')", (f"seen_dialog:{thread_id}:{item_id}",)).rowcount == 1
+
+    def add(self, project, task, thread_id=None):
         now = time.time()
         with self.db() as db:
-            return db.execute("INSERT INTO jobs(project,task,created,updated) VALUES(?,?,?,?)", (project, task, now, now)).lastrowid
+            return db.execute("INSERT INTO jobs(project,task,created,updated,thread_id,ready) VALUES(?,?,?,?,?,?)", (project, task, now, now, thread_id, int(thread_id is not None))).lastrowid
 
     def job(self, job_id):
         with self.db() as db:
@@ -150,7 +168,7 @@ class State:
             for row in db.execute("SELECT * FROM schedules WHERE enabled=1 AND next_run<=?", (now,)).fetchall():
                 busy = db.execute("SELECT 1 FROM jobs WHERE project=? AND (status IN ('running','review','publishing','publish_queued') OR (status='queued' AND ready=1))", (row["project"],)).fetchone()
                 if not busy:
-                    db.execute("UPDATE jobs SET ready=1 WHERE id=(SELECT id FROM jobs WHERE project=? AND status='queued' AND ready=0 ORDER BY id LIMIT 1)", (row["project"],))
+                    db.execute("UPDATE jobs SET ready=1 WHERE id=(SELECT id FROM jobs WHERE project=? AND status='queued' AND ready=0 AND thread_id IS NULL ORDER BY id LIMIT 1)", (row["project"],))
                 db.execute("UPDATE schedules SET next_run=? WHERE project=?", (now + row["hours"] * 3600, row["project"]))
 
     def accept_update(self, update_id):

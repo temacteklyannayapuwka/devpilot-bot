@@ -1,4 +1,5 @@
 import fcntl
+import asyncio
 import os
 import signal
 import re
@@ -8,6 +9,8 @@ import time
 from pathlib import Path
 
 from models import SettingsError
+from dialog import Dialog
+from codex_limits import LimitsUnavailable
 
 
 class RunError(Exception):
@@ -96,6 +99,13 @@ class Runner:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RunError("Проект уже занят другим DevPilot.") from None
+            if job.get("thread_id"):
+                before = self.git(project.path, "rev-parse", "HEAD")
+                asyncio.run(Dialog(self.state, job, project, self.settings, self.stop, self.codex_bin).run())
+                after = self.git(project.path, "rev-parse", "HEAD")
+                self.state.update(job["id"], status="done", commit_sha=after if after != before else None,
+                                  report="Ответ передан в Telegram.\nДиалог: " + job["thread_id"] + "\n" + self.git(project.path, "status", "--short")[:1500])
+                return
             if job["status"] == "publishing":
                 self.publish(job, project, tree, log)
                 return
@@ -164,9 +174,9 @@ class Runner:
                 if job:
                     try:
                         self.execute(job)
-                    except (RunError, OSError, subprocess.SubprocessError, SettingsError) as error:
+                    except (RunError, OSError, subprocess.SubprocessError, SettingsError, LimitsUnavailable) as error:
                         current = self.state.job(job["id"])
-                        status = "review" if current["commit_sha"] else ("cancelled" if isinstance(error, Cancelled) else "failed")
+                        status = "review" if current["commit_sha"] else ("cancelled" if isinstance(error, Cancelled) or current["cancel"] else "failed")
                         self.state.update(job["id"], status=status, report=current["report"] + "\n" + str(error))
                     result = self.state.job(job["id"])
                     if result["status"] == "failed":

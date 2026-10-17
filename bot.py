@@ -16,6 +16,7 @@ from config import load_env, load_projects
 from commands import Commands, HELP
 from runner import Runner
 from state import State
+from dialog import SessionWatcher
 
 
 class TelegramError(Exception):
@@ -97,6 +98,8 @@ def main():
     logging.info("DevPilot запущен")
     worker = threading.Thread(target=runner.loop, name="devpilot-worker", daemon=True)
     worker.start()
+    watcher = threading.Thread(target=SessionWatcher(state, projects, runner.stop).loop, name="devpilot-dialog-watcher", daemon=True)
+    watcher.start()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: runner.stop.set())
     try:
@@ -104,6 +107,7 @@ def main():
     finally:
         runner.stop.set()
         worker.join(timeout=70)
+        watcher.join(timeout=25)
         singleton.close()
 
 
@@ -127,7 +131,7 @@ def run_loop(telegram, owner_id, interval, state, commands, runner, offset, pane
                     if command in ("/start", "/limits"):
                         if command == "/start":
                             telegram.call("sendMessage", chat_id=owner_id, text=HELP, reply_markup={
-                                "keyboard": [["/status", "/projects"], ["/tasks", "/schedule"], ["/pause", "/resume"], ["/limits", "/models"]],
+                                "keyboard": [[f"/use {name}"] for name in commands.projects] + [["/status", "/projects"], ["/project", "/tasks"], ["/pause", "/resume"], ["/limits", "/models"]],
                                 "resize_keyboard": True,
                             })
                         panel = telegram.call("sendMessage", chat_id=owner_id, text=limits_text())

@@ -1,11 +1,22 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import asyncio
+import subprocess
 
 from models import model_command
+from codex_limits import LimitsUnavailable
+from dialog import session_list, validate_session, recent_messages
 
 
 HELP = """DevPilot
 /projects — проекты
+/use ПРОЕКТ — выбрать проект для переписки
+/project [ПРОЕКТ] — состояние проекта
+/sessions ПРОЕКТ — доступные диалоги Codex
+/bind ПРОЕКТ ID — привязать существующий диалог
+/leave — выйти из режима переписки
+/approve ТОКЕН / /deny ТОКЕН — запрос разрешения
+/answer ТОКЕН ID_ВОПРОСА ответ — ответ на вопрос Codex
 /task ПРОЕКТ описание — поставить задачу
 /tasks [ПРОЕКТ] — очередь и история
 /run ПРОЕКТ — запустить следующую задачу
@@ -43,8 +54,27 @@ class Commands:
         command = parts[0].split("@", 1)[0]
         argument = parts[1].strip() if len(parts) > 1 else ""
         try:
+            if not text.lstrip().startswith("/"):
+                name = self.state.get("active_project")
+                if not name:
+                    return "Выбери проект: /projects, затем /use ИМЯ."
+                self.project(name)
+                requests = [(token, request) for token, request in self.state.pending_requests(name) if request["kind"] == "questions"]
+                if requests:
+                    token, request = requests[0]
+                    unanswered = [q for q in request["questions"] if q["id"] not in request["answers"]]
+                    if len(requests) == 1 and len(unanswered) == 1:
+                        return self.dispatch("/answer", f"{token} {unanswered[0]['id']} {text}")
+                    return "Codex задал несколько вопросов. Ответь командой /answer из его сообщения."
+                thread_id = self.state.get(f"session:{name}")
+                if not thread_id:
+                    return f"Сначала привяжи диалог: /sessions {name}, затем /bind {name} ID."
+                job_id = self.state.add(name, text, thread_id)
+                return f"[{name}] Сообщение #{job_id} в очереди." + (" Включена пауза: /resume." if self.state.get("paused", False) else "")
             return self.dispatch(command, argument)
-        except (ValueError, KeyError):
+        except LimitsUnavailable as error:
+            return str(error)
+        except (ValueError, KeyError, IndexError):
             return "Проверь аргументы команды. /help"
 
     def project(self, name):
@@ -58,7 +88,62 @@ class Commands:
         if command in ("/models", "/model"):
             return model_command(command, argument, self.settings)
         if command == "/projects":
-            return "\n".join(f"{p.name} → {p.path} → origin/{p.branch}" for p in self.projects.values()) or "Нет проектов. Заполни projects.json на Mac."
+            active = self.state.get("active_project")
+            return "\n".join(f"{'✓ ' if p.name == active else ''}{p.name} → {p.path}\nДиалог: {self.state.get('session:' + p.name) or 'не привязан'}\n/use {p.name}" for p in self.projects.values()) or "Нет проектов. Заполни projects.json на Mac."
+        if command in ("/use", "/chat"):
+            self.project(argument)
+            self.state.set("active_project", argument)
+            return f"Выбран {argument}. Обычные сообщения пойдут в его диалог Codex." if self.state.get(f"session:{argument}") else f"Выбран {argument}. Привяжи диалог: /sessions {argument}, затем /bind {argument} ID."
+        if command == "/leave":
+            self.state.set("active_project", None)
+            return "Режим переписки отключён. Задачи и расписание продолжают работать."
+        if command == "/sessions":
+            project = self.project(argument)
+            sessions = asyncio.run(session_list(project))
+            return "\n".join(f"{s['id']} · {s.get('name') or s.get('preview', '')[:120]}" for s in sessions) or "Codex CLI не вернул диалоги этого каталога. Если у тебя есть ID доступной локальной сессии, используй /bind. Облачные чаты автоматически не переносятся."
+        if command == "/bind":
+            name, thread_id = argument.split()
+            project = self.project(name)
+            asyncio.run(validate_session(project, thread_id))
+            for item in asyncio.run(recent_messages(thread_id)):
+                self.state.mark_dialog_message(thread_id, item["id"])
+            self.state.set(f"session:{name}", thread_id)
+            self.state.set("active_project", name)
+            return f"Диалог {thread_id} привязан к {name}. Пиши обычным сообщением — передам в Codex."
+        if command == "/project":
+            name = argument or self.state.get("active_project")
+            project = self.project(name)
+            try:
+                result = subprocess.run(["git", "-C", str(project.path), "status", "--short", "--branch"], capture_output=True, text=True, timeout=10)
+                if result.returncode:
+                    return "Не удалось прочитать состояние Git проекта."
+                return f"{name}\n{project.path}\nДиалог: {self.state.get('session:' + name) or 'не привязан'}\n{result.stdout[:2500]}"
+            except (OSError, subprocess.TimeoutExpired):
+                return "Не удалось прочитать состояние Git проекта."
+        if command in ("/approve", "/deny", "/answer"):
+            parts = argument.split(maxsplit=2)
+            token = parts[0]
+            request = self.state.get(f"dialog_request:{token}")
+            if not request or self.state.job(request["job_id"])["status"] != "running":
+                return "Запрос уже завершён или не найден."
+            if self.state.get(f"dialog_reply:{token}") is not None:
+                return "Ответ уже передан; дождись продолжения Codex."
+            if command in ("/approve", "/deny") and request["kind"] == "approval":
+                result = {"decision": "accept" if command == "/approve" else "decline"}
+            elif command == "/answer" and request["kind"] == "questions":
+                _, question_id, answer = parts
+                valid = {q["id"] for q in request["questions"]}
+                if question_id not in valid:
+                    return "Неизвестный ID вопроса."
+                request["answers"][question_id] = {"answers": [answer]}
+                self.state.set(f"dialog_request:{token}", request)
+                if valid - request["answers"].keys():
+                    return "Ответ сохранён. Остались вопросы: " + ", ".join(sorted(valid - request["answers"].keys()))
+                result = {"answers": request["answers"]}
+            else:
+                return "Команда не соответствует типу запроса."
+            self.state.set(f"dialog_reply:{token}", result)
+            return f"[{request['project']}] Ответ передан Codex."
         if command == "/task":
             name, task = argument.split(maxsplit=1)
             self.project(name)
@@ -117,7 +202,7 @@ class Commands:
             if command == "/retry":
                 if job["status"] not in ("failed", "cancelled", "interrupted", "rejected", "no_changes"):
                     return "Повтор возможен для неуспешных, отклонённых или прерванных задач."
-                new_id = self.state.add(job["project"], job["task"])
+                new_id = self.state.add(job["project"], job["task"], job.get("thread_id"))
                 return f"Создана задача #{new_id}. /run {job['project']}"
             if command == "/publish":
                 return "Публикация поставлена в очередь." if self.state.queue_publish(job_id) else "Нет проверенного коммита, ожидающего публикации."

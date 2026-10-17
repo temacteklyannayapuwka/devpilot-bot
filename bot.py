@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 
 from codex_limits import limits_text
+from models import ModelSettings, model_command
 
 
 class TelegramError(Exception):
@@ -61,6 +62,7 @@ def main():
     except ValueError:
         raise SystemExit("Задай TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID и интервал >= 60 секунд.")
     telegram = Telegram(token)
+    settings = ModelSettings()
     offset = 0
     panel_id = None
     next_refresh = float("inf")
@@ -74,7 +76,13 @@ def main():
                 if authorized(message, owner_id):
                     command = message.get("text", "").split(maxsplit=1)[0:1]
                     command = command[0].split("@", 1)[0] if command else ""
-                    if command in ("/start", "/limits"):
+                    if command in ("/models", "/model"):
+                        parts = message.get("text", "").split(maxsplit=1)
+                        argument = parts[1].strip() if len(parts) > 1 else ""
+                        text = model_command(command, argument, settings)
+                        for index in range(0, len(text), 4000):
+                            telegram.call("sendMessage", chat_id=owner_id, text=text[index:index + 4000])
+                    elif command in ("/start", "/limits"):
                         panel = telegram.call("sendMessage", chat_id=owner_id, text=limits_text())
                         panel_id = panel["message_id"]
                         next_refresh = time.monotonic() + interval
@@ -83,6 +91,7 @@ def main():
                             "DevPilot работает.\n"
                             f"Панель лимитов обновляется каждые {interval} секунд после /start.\n"
                             "Выполнение задач разработки пока не подключено.\n"
+                            "/models — доступные модели\n/model — сохранённый выбор\n"
                             "/limits — свежие лимиты\n/stop — остановить обновление панели"
                         ))
                     elif command == "/stop":

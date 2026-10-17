@@ -9,7 +9,7 @@ class LimitsUnavailable(Exception):
     pass
 
 
-async def read_limits():
+async def codex_request(method, params=None):
     try:
         process = await asyncio.create_subprocess_exec(
             os.environ.get("CODEX_BIN", "codex"), "app-server",
@@ -32,7 +32,7 @@ async def read_limits():
             if data.get("id") != request_id:
                 continue
             if "error" in data:
-                raise LimitsUnavailable("Лимиты недоступны. Проверь codex login на Mac.")
+                raise LimitsUnavailable("Запрос Codex отклонён. Проверь codex login на Mac.")
             return data["result"]
 
     async def exchange():
@@ -41,13 +41,13 @@ async def read_limits():
         }})
         await response(1)
         await send({"method": "initialized", "params": {}})
-        await send({"id": 2, "method": "account/rateLimits/read"})
+        await send({"id": 2, "method": method, "params": params or {}})
         return await response(2)
 
     try:
         return await asyncio.wait_for(exchange(), timeout=20)
     except (TimeoutError, ValueError, KeyError, ConnectionError):
-        raise LimitsUnavailable("Не удалось получить свежие лимиты Codex.") from None
+        raise LimitsUnavailable("Не удалось получить данные Codex.") from None
     finally:
         if process.returncode is None:
             try:
@@ -59,6 +59,10 @@ async def read_limits():
             except TimeoutError:
                 process.kill()
                 await process.wait()
+
+
+async def read_limits():
+    return await codex_request("account/rateLimits/read")
 
 
 def format_limits(data, timezone="Europe/Moscow"):
